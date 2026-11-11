@@ -13,6 +13,12 @@ import sms
 
 app = Flask(__name__)
 app.secret_key = os.environ.get("SESSION_SECRET", "dev-only-change-me-in-production")
+app.config.update(
+    SESSION_COOKIE_HTTPONLY=True,
+    SESSION_COOKIE_SAMESITE="Lax",
+    # Only require HTTPS cookies when NOT on localhost (Render = production)
+    SESSION_COOKIE_SECURE=bool(os.environ.get("RENDER")),
+)
 
 db.init_db()
 
