@@ -1,0 +1,282 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1">
+<title>Driver — Bus 4</title>
+<style>
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0; height: 100%;
+    font-family: system-ui, sans-serif;
+    background: #0f172a; color: #e5e7eb;
+    -webkit-tap-highlight-color: transparent;
+  }
+  #app {
+    display: flex; flex-direction: column;
+    height: 100%; max-width: 480px; margin: 0 auto;
+    padding: 20px 16px; gap: 16px;
+  }
+  h1 { margin: 0; font-size: 22px; font-weight: 600; }
+  .muted { color: #94a3b8; font-size: 14px; }
+  .big-number {
+    font-size: 56px; font-weight: 700; line-height: 1;
+    color: #38bdf8; font-variant-numeric: tabular-nums;
+  }
+  .card {
+    background: #1e293b; border: 1px solid #334155; border-radius: 14px;
+    padding: 16px;
+  }
+  .row {
+    display: flex; align-items: center; justify-content: space-between;
+    gap: 12px; padding: 8px 0;
+  }
+  .row + .row { border-top: 1px solid #334155; }
+  .label { color: #94a3b8; font-size: 13px; text-transform: uppercase; letter-spacing: .04em; }
+  .value { font-size: 15px; text-align: right; word-break: break-all; }
+  #next-stop { color: #38bdf8; font-weight: 600; font-size: 17px; }
+  button {
+    border: 0; border-radius: 14px; font-size: 19px; font-weight: 600;
+    padding: 18px; width: 100%; cursor: pointer;
+    transition: transform .06s ease;
+  }
+  button:active { transform: scale(.98); }
+  button:disabled { opacity: .4; cursor: not-allowed; }
+  #btn-start { background: #22c55e; color: #052e16; }
+  #btn-stop  { background: #ef4444; color: #fff; }
+  #btn-start.hidden, #btn-stop.hidden { display: none; }
+  .dot {
+    display: inline-block; width: 10px; height: 10px; border-radius: 50%;
+    background: #ef4444; margin-right: 8px;
+    box-shadow: 0 0 8px #ef4444;
+  }
+  .dot.live { background: #22c55e; box-shadow: 0 0 10px #22c55e; }
+  .toast {
+    position: fixed; left: 50%; bottom: 20px; transform: translateX(-50%);
+    background: #1e293b; border: 1px solid #334155; color: #e5e7eb;
+    padding: 10px 16px; border-radius: 12px; font-size: 14px;
+    opacity: 0; pointer-events: none; transition: opacity .2s ease;
+    max-width: 90vw; text-align: center;
+  }
+  .toast.show { opacity: 1; }
+
+  #netdot {
+    position: fixed; top: 14px; right: 16px; z-index: 999;
+    background: #1e293b; border: 1px solid #334155; border-radius: 999px;
+    padding: 6px 12px; font-size: 12px; color: #cbd5e1;
+    display: flex; align-items: center; gap: 8px;
+  }
+  #netdot span { width: 8px; height: 8px; border-radius: 50%; background: #f87171; }
+  #netdot.live span { background: #4ade80; box-shadow: 0 0 6px #4ade80; }
+</style>
+</head>
+<body>
+
+<div id="netdot"><span></span><em id="netdot-label" style="font-style:normal">connecting…</em></div>
+<div id="app">
+  <div>
+    <h1>Driver — {{ bus_name }}</h1>
+    <div style="font-size:13px"><a href="/school?key=school-demo-key">← School dashboard</a></div>
+    <div class="muted">{{ plate }}</div>
+  </div>
+
+  <div class="card">
+    <div class="row">
+      <div class="label">Status</div>
+      <div class="value">
+        <span class="dot" id="dot"></span><span id="state">idle</span>
+      </div>
+    </div>
+    <div class="row">
+      <div class="label">Last sent</div>
+      <div class="value" id="last-sent">—</div>
+    </div>
+    <div class="row">
+      <div class="label">Coordinates</div>
+      <div class="value" id="coords">—</div>
+    </div>
+    <div class="row">
+      <div class="label">Accuracy</div>
+      <div class="value" id="accuracy">—</div>
+    </div>
+    <div class="row">
+      <div class="label">Next stop</div>
+      <div class="value" id="next-stop">—</div>
+    </div>
+    <div class="row">
+      <div class="label">ETA</div>
+      <div class="value" id="eta">—</div>
+    </div>
+  </div>
+
+  <button id="btn-start">Start trip</button>
+  <button id="btn-stop" class="hidden">Stop trip</button>
+
+  <div class="muted" style="text-align:center;font-size:12px">
+    Keep this page open while driving.<br>Pings every 15 s.
+  </div>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script>
+  const TOKEN   = {{ token | tojson }};
+  const BUS_ID  = {{ bus_id | tojson }};
+  const API_PING  = '/api/driver/ping';
+  const API_START = '/api/driver/start';
+
+  const $ = id => document.getElementById(id);
+  const stateEl = $('state'), dotEl = $('dot'), lastSentEl = $('last-sent');
+  const coordsEl = $('coords'), accEl = $('accuracy');
+  const nextStopEl = $('next-stop'), etaEl = $('eta');
+  const btnStart = $('btn-start'), btnStop = $('btn-stop');
+  const toastEl = $('toast');
+
+  let watchId = null;
+  let timerId = null;
+  let lastPos = null;      // {lat, lng, accuracy}
+  let started = false;
+  let sending = false;
+
+  function toast(msg, ms = 2200) {
+    toastEl.textContent = msg;
+    toastEl.classList.add('show');
+    setTimeout(() => toastEl.classList.remove('show'), ms);
+  }
+
+  function setState(label, live) {
+    stateEl.textContent = label;
+    dotEl.classList.toggle('live', !!live);
+  }
+
+  function fmtTime(d) {
+    return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+  }
+
+  // ---- geolocation ----
+  function onPos(pos) {
+    const c = pos.coords;
+    lastPos = { lat: c.latitude, lng: c.longitude, accuracy: c.accuracy };
+    coordsEl.textContent = `${c.latitude.toFixed(5)}, ${c.longitude.toFixed(5)}`;
+    accEl.textContent = `±${Math.round(c.accuracy)} m`;
+  }
+
+  function onPosErr(err) {
+    toast(`Location error: ${err.message}`, 4000);
+    setState('location error', false);
+  }
+
+  function startWatching() {
+    if (watchId != null) return;
+    if (!navigator.geolocation) {
+      toast('Geolocation not supported on this browser', 4000);
+      return;
+    }
+    watchId = navigator.geolocation.watchPosition(
+      onPos, onPosErr,
+      { enableHighAccuracy: true, maximumAge: 5000, timeout: 20000 }
+    );
+  }
+
+  function stopWatching() {
+    if (watchId != null) {
+      navigator.geolocation.clearWatch(watchId);
+      watchId = null;
+    }
+  }
+
+  // ---- sending ----
+  async function sendPing() {
+    if (!started || sending) return;
+    if (!lastPos) {
+      setState('waiting for GPS…', false);
+      return;
+    }
+    sending = true;
+    setState('sending…', true);
+    try {
+      const r = await fetch(API_PING, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Driver-Token': TOKEN,
+        },
+        body: JSON.stringify({
+          bus_id: BUS_ID,
+          lat: lastPos.lat,
+          lng: lastPos.lng,
+          ts: Math.floor(Date.now() / 1000),
+        }),
+      });
+      if (r.status === 409) {
+        // finished
+        toast('Trip already finished. Tap Stop, then Start again.', 4000);
+        stopTrip(false);
+        return;
+      }
+      if (!r.ok) throw new Error('HTTP ' + r.status);
+      const data = await r.json();
+      lastSentEl.textContent = fmtTime(new Date());
+      nextStopEl.textContent = data.next_stop || '—';
+      const s = data.next_stop ? data.stops.find(x => x.name === data.next_stop) : null;
+      etaEl.textContent = s && s.eta_min != null ? `${s.eta_min} min` : '—';
+      setState(data.status || 'live', true);
+      document.getElementById('netdot').classList.add('live');
+      document.getElementById('netdot-label').textContent = 'online';
+    } catch (e) {
+      setState('send failed', false);
+      document.getElementById('netdot').classList.remove('live');
+      document.getElementById('netdot-label').textContent = 'offline';
+      toast('Ping failed: ' + e.message, 3000);
+    } finally {
+      sending = false;
+    }
+  }
+
+  // ---- start / stop ----
+  async function startTrip() {
+    btnStart.disabled = true;
+    try {
+      const r = await fetch(API_START, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-Driver-Token': TOKEN },
+        body: JSON.stringify({ bus_id: BUS_ID }),
+      });
+      if (!r.ok) throw new Error('HTTP ' + r.status);
+      started = true;
+      btnStart.classList.add('hidden');
+      btnStop.classList.remove('hidden');
+      startWatching();
+      // send immediately, then every 15 s
+      await sendPing();
+      timerId = setInterval(sendPing, 15000);
+      toast('Trip started', 1800);
+    } catch (e) {
+      toast('Start failed: ' + e.message, 3500);
+      btnStart.disabled = false;
+    }
+  }
+
+  function stopTrip(showToast = true) {
+    started = false;
+    stopWatching();
+    if (timerId) { clearInterval(timerId); timerId = null; }
+    btnStop.classList.add('hidden');
+    btnStart.classList.remove('hidden');
+    btnStart.disabled = false;
+    setState('idle', false);
+    if (showToast) toast('Trip stopped', 1500);
+  }
+
+  btnStart.addEventListener('click', startTrip);
+  btnStop.addEventListener('click', () => stopTrip(true));
+
+  // re-send immediately when the tab becomes visible again (phones pause timers)
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'visible' && started) {
+      sendPing();
+    }
+  });
+</script>
+</body>
+</html>

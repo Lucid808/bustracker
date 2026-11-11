@@ -1,0 +1,35 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1">
+<title>{% block title %}Bus tracker{% endblock %}</title>
+<link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+{% block head %}{% endblock %}
+</head>
+<body>
+<nav class="nav">
+  <a class="brand" href="/">🚌 Bus tracker</a>
+  <div class="links">
+    <a href="/school?key={{ school_key }}" class="{% block nav_school %}{% endblock %}">School</a>
+    <a href="/parent/parent-demo-amani"   class="{% block nav_parent %}{% endblock %}">Parent</a>
+    <a href="/driver?token=driver-demo-bus4" class="{% block nav_driver %}{% endblock %}">Driver</a>
+    <a href="/logout" style="color:#f87171">Logout</a>
+  </div>
+</nav>
+
+{% block body %}{% endblock %}
+
+<div class="toast" id="toast"></div>
+<script>
+  function toast(msg, ms = 2000) {
+    const el = document.getElementById('toast');
+    el.textContent = msg;
+    el.classList.add('show');
+    clearTimeout(window.__toastTimer);
+    window.__toastTimer = setTimeout(() => el.classList.remove('show'), ms);
+  }
+</script>
+{% block scripts %}{% endblock %}
+</body>
+</html>

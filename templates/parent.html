@@ -1,0 +1,167 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Bus tracker — {{ bus_name }}</title>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+<style>
+  html, body { margin: 0; padding: 0; height: 100%; font-family: system-ui, sans-serif; background: #0f172a; color: #e5e7eb; }
+  #map   { position: absolute; inset: 0 0 110px 0; }
+  #panel {
+    position: absolute; left: 0; right: 0; bottom: 0; height: 110px;
+    padding: 12px 16px; box-sizing: border-box;
+    background: rgba(15,23,42,.95); border-top: 1px solid #334155;
+    display: flex; flex-direction: column; justify-content: center; gap: 6px;
+  }
+  #next       { font-size: 20px; font-weight: 600; color: #38bdf8; }
+  #meta       { font-size: 13px; color: #94a3b8; }
+  #status     { font-size: 13px; font-weight: 600; }
+  #status.on-time  { color: #4ade80; }
+  #status.delayed  { color: #f87171; }
+  #status.finished { color: #94a3b8; }
+  #status.waiting  { color: #facc15; }
+  #dot {
+    position: absolute; top: 14px; right: 16px; z-index: 999;
+    background: #1e293b; border: 1px solid #334155; border-radius: 999px;
+    padding: 6px 12px; font-size: 12px; color: #cbd5e1;
+    display: flex; align-items: center; gap: 8px;
+  }
+  #dot span { width: 8px; height: 8px; border-radius: 50%; background: #f87171; }
+  #dot.live span { background: #4ade80; box-shadow: 0 0 6px #4ade80; }
+  .stop-pin { font-size: 20px; line-height: 20px; text-align: center; }
+  .stop-label {
+    background: #1e293b; color: #e5e7eb; border: 1px solid #334155;
+    border-radius: 4px; padding: 1px 5px; font-size: 11px; white-space: nowrap;
+  }
+</style>
+</head>
+<body>
+
+<div id="map"></div>
+<div id="dot"><span></span><em id="dot-label" style="font-style:normal">connecting…</em></div>
+<a href="/school?key=school-demo-key" style="position:absolute;top:14px;left:16px;z-index:999;background:#1e293b;border:1px solid #334155;border-radius:999px;padding:6px 12px;font-size:12px;color:#cbd5e1;text-decoration:none">← School</a>
+
+<div id="panel">
+  <div id="next">Loading…</div>
+  <div id="meta">—</div>
+  <div id="status" class="waiting">—</div>
+</div>
+
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script>
+  const TOKEN = {{ token | tojson }};
+  const STOPS = {{ stops | tojson }};
+  const CENTER = {{ center | tojson }};
+  const API = `/api/parent/${TOKEN}`;
+
+  // --- map ---
+  const map = L.map('map', { zoomControl: false }).setView(CENTER, 13);
+  L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+    maxZoom: 19,
+    attribution: '© OpenStreetMap contributors',
+  }).addTo(map);
+  L.control.zoom({ position: 'bottomright' }).addTo(map);
+
+  // --- route polyline ---
+  const route = L.polyline(STOPS.map(s => [s.lat, s.lng]), {
+    color: '#38bdf8', weight: 4, opacity: .8, dashArray: '1 8',
+  }).addTo(map);
+
+  // --- stop markers ---
+  const stopMarkers = {};
+  STOPS.forEach(s => {
+    const icon = L.divIcon({
+      className: 'stop-pin',
+      html: '📍',
+      iconSize: [20, 20], iconAnchor: [10, 20],
+    });
+    const m = L.marker([s.lat, s.lng], { icon })
+      .bindTooltip(s.name, { permanent: true, direction: 'top', className: 'stop-label' })
+      .addTo(map);
+    stopMarkers[s.id] = m;
+  });
+
+  // --- bus marker ---
+  const busIcon = L.divIcon({
+    className: '',
+    html: '<div style="background:#38bdf8;width:22px;height:22px;border-radius:50%;' +
+          'border:3px solid #0f172a;box-shadow:0 0 12px #38bdf8;"></div>',
+    iconSize: [22, 22], iconAnchor: [11, 11],
+  });
+  let busMarker = null;
+
+  // --- fetch + render ---
+  let lastOk = 0;
+  const dot = document.getElementById('dot');
+  const dotLabel = document.getElementById('dot-label');
+
+  async function refresh() {
+    try {
+      const r = await fetch(API, { cache: 'no-store' });
+      if (!r.ok) throw new Error('HTTP ' + r.status);
+      const data = await r.json();
+      render(data);
+      lastOk = Date.now();
+      dot.classList.add('live');
+      dotLabel.textContent = 'live';
+    } catch (e) {
+      dot.classList.remove('live');
+      dotLabel.textContent = 'offline — retrying';
+    }
+  }
+
+  function render(data) {
+    // bus marker
+    if (data.lat != null && data.lng != null) {
+      const p = [data.lat, data.lng];
+      if (!busMarker) {
+        busMarker = L.marker(p, { icon: busIcon, zIndexOffset: 1000 }).addTo(map);
+        map.setView(p, 14);
+      } else {
+        busMarker.setLatLng(p);
+      }
+    }
+
+    // stop markers — highlight passed
+    data.stops.forEach(s => {
+      const m = stopMarkers[s.id];
+      if (!m) return;
+      m.setOpacity(s.passed ? 0.35 : 1);
+    });
+
+    // panel
+    const next = document.getElementById('next');
+    const meta = document.getElementById('meta');
+    const status = document.getElementById('status');
+
+    status.className = data.status || 'waiting';
+    status.textContent = ({
+      'on-time':  'On time',
+      'delayed':  `Delayed by ${Math.round(data.delay_min)} min`,
+      'finished': 'Trip finished',
+      'waiting':  'Waiting to start',
+    }[data.status] || data.status);
+
+    if (data.next_stop) {
+      const s = data.stops.find(x => x.name === data.next_stop);
+      const eta = s && s.eta_min != null ? `${s.eta_min} min` : '—';
+      const km  = s && s.km     != null ? `${s.km} km`  : '';
+      next.textContent = `Next: ${data.next_stop} · ${eta}${km ? ' (' + km + ')' : ''}`;
+    } else {
+      next.textContent = 'Trip finished';
+    }
+
+    const age = data.lat == null ? 'no pings yet'
+              : (s => s < 60 ? `${s}s ago` : `${Math.round(s/60)}m ago`)(
+                  Math.max(0, Math.round(Date.now()/1000 - 0)) // placeholder; we use client side clock below
+                );
+    // simpler: show the time of the last successful refresh
+    meta.textContent = `Bus ${data.bus_id} · last refresh ${new Date().toLocaleTimeString()}`;
+  }
+
+  refresh();
+  setInterval(refresh, 10000);
+</script>
+</body>
+</html>

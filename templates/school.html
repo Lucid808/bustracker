@@ -1,0 +1,202 @@
+{% extends "base.html" %}
+{% block title %}School dashboard — Bus tracker{% endblock %}
+{% block nav_school %}active{% endblock %}
+{% block head %}
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+<style>
+  #mini-map { height: 340px; border-radius: 14px; overflow: hidden; border: 1px solid #334155; }
+  @media (max-width: 640px) { #mini-map { height: 240px; } }
+</style>
+{% endblock %}
+
+{% block body %}
+<div class="container">
+  <h1>School dashboard</h1>
+  <div class="muted" id="live-status">connecting…</div>
+
+  <div id="mini-map" style="margin-top: 16px"></div>
+
+  <h2>Fleet</h2>
+  <div class="card" style="overflow-x:auto">
+    <table>
+      <thead>
+        <tr>
+          <th>Bus</th>
+          <th>Plate</th>
+          <th>Status</th>
+          <th>Next stop</th>
+          <th class="right">ETA</th>
+          <th class="right">Delay</th>
+          <th>Last ping</th>
+        </tr>
+      </thead>
+      <tbody id="fleet-body">
+        <tr><td colspan="7" class="muted">Loading…</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h2>Recent events</h2>
+  <div class="card" style="display:flex;flex-wrap:wrap;gap:12px;align-items:flex-end;margin-bottom:12px">
+    <label style="display:flex;flex-direction:column;gap:4px;font-size:13px;color:#94a3b8">
+      From
+      <input type="date" id="events-from" style="background:#0f172a;color:#e5e7eb;border:1px solid #334155;border-radius:8px;padding:8px">
+    </label>
+    <label style="display:flex;flex-direction:column;gap:4px;font-size:13px;color:#94a3b8">
+      To
+      <input type="date" id="events-to" style="background:#0f172a;color:#e5e7eb;border:1px solid #334155;border-radius:8px;padding:8px">
+    </label>
+    <button id="events-apply" style="background:#38bdf8;color:#0f172a;border:0;border-radius:8px;padding:9px 14px;font-weight:600;cursor:pointer">Apply</button>
+    <button id="events-clear" style="background:transparent;color:#94a3b8;border:1px solid #334155;border-radius:8px;padding:9px 14px;cursor:pointer">Clear</button>
+  </div>
+  <div class="card" id="events-card">
+    <div class="muted">Loading…</div>
+  </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script>
+  const SCHOOL_KEY = {{ school_key | tojson }};
+  const API = (path) => path + (path.includes('?') ? '&' : '?') + 'key=' + encodeURIComponent(SCHOOL_KEY);
+
+  const fleetBody = document.getElementById('fleet-body');
+  const eventsCard = document.getElementById('events-card');
+  const liveStatus = document.getElementById('live-status');
+
+  function pill(status) {
+    const cls = ['on-time','delayed','finished','waiting'].includes(status) ? status : 'waiting';
+    return `<span class="pill ${cls}">${status || '—'}</span>`;
+  }
+  function humanAge(ts) {
+    if (!ts) return '—';
+    const s = Math.max(0, Math.round(Date.now()/1000 - ts));
+    if (s < 60)   return `${s}s ago`;
+    if (s < 3600) return `${Math.round(s/60)}m ago`;
+    return `${Math.round(s/3600)}h ago`;
+  }
+  function esc(s) {
+    return String(s ?? '').replace(/[&<>"']/g, c => ({
+      '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'
+    }[c]));
+  }
+
+  async function refreshFleet() {
+    try {
+      const r = await fetch(API('/api/fleet'), { cache: 'no-store' });
+      if (!r.ok) throw new Error('HTTP ' + r.status);
+      const { buses } = await r.json();
+      if (!buses.length) {
+        fleetBody.innerHTML = '<tr><td colspan="7" class="muted">No buses are currently tracked.</td></tr>';
+      } else {
+        fleetBody.innerHTML = buses.map(b => {
+          const next = b.stops.find(s => s.name === b.next_stop);
+          const eta  = next && next.eta_min != null ? `${next.eta_min} min` : '—';
+          const km   = next && next.km      != null ? ` (${next.km} km)`  : '';
+          return `
+            <tr>
+              <td><strong>${esc(b.bus_id)}</strong></td>
+              <td class="muted">${esc(b.plate || '')}</td>
+              <td>${pill(b.status)}</td>
+              <td>${esc(b.next_stop || '—')}</td>
+              <td class="right num">${esc(eta)}${km}</td>
+              <td class="right num">${b.delay_min ? b.delay_min + ' min' : '—'}</td>
+              <td class="muted">${humanAge(b.ts)}</td>
+            </tr>`;
+        }).join('');
+      }
+      updateMiniMap(buses);
+      liveStatus.innerHTML = '<span class="dot live"></span>live · last refresh ' + new Date().toLocaleTimeString();
+    } catch (e) {
+      liveStatus.innerHTML = '<span class="dot"></span>offline — retrying';
+    }
+  }
+
+  async function refreshEvents() {
+    try {
+      const from = document.getElementById('events-from').value;
+      const to   = document.getElementById('events-to').value;
+      let url = '/api/events?limit=15';
+      if (from) url += '&from=' + from;
+      if (to)   url += '&to=' + to;
+      const r = await fetch(API(url), { cache: 'no-store' });
+      if (!r.ok) throw new Error('HTTP ' + r.status);
+      const { events } = await r.json();
+      if (!events.length) {
+        eventsCard.innerHTML = '<div class="muted">No events yet.</div>';
+        return;
+      }
+      eventsCard.innerHTML = '<table><tbody>' + events.map(e => {
+        const when = new Date(e.created * 1000).toLocaleTimeString();
+        let detail = '';
+        if (e.type === 'approach') detail = `approaching <strong>${esc(e.payload.stop)}</strong> · ${e.payload.eta_min} min`;
+        else if (e.type === 'late') detail = `delayed by <strong>${e.payload.delay_min} min</strong>`;
+        else detail = `<span class="mono">${esc(JSON.stringify(e.payload))}</span>`;
+        return `<tr>
+          <td class="muted" style="width:100px">${esc(when)}</td>
+          <td><span class="pill ${e.type === 'late' ? 'delayed' : 'on-time'}">${esc(e.type)}</span></td>
+          <td>${esc(e.bus)}</td>
+          <td>${detail}</td>
+        </tr>`;
+      }).join('') + '</tbody></table>';
+    } catch (e) {
+      eventsCard.innerHTML = '<div class="muted">Failed to load events.</div>';
+    }
+  }
+
+  // ---- mini map ----
+  let miniMap = null;
+  const busMarkers = {};
+  const busIcon = L.divIcon({
+    className: '',
+    html: '<div style="background:#38bdf8;width:18px;height:18px;border-radius:50%;' +
+          'border:3px solid #0f172a;box-shadow:0 0 10px #38bdf8;"></div>',
+    iconSize: [18, 18], iconAnchor: [9, 9],
+  });
+
+  function updateMiniMap(buses) {
+    if (!miniMap) {
+      miniMap = L.map('mini-map', { zoomControl: true }).setView([-1.47, 36.96], 12);
+      L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+        maxZoom: 19,
+        attribution: '© OpenStreetMap contributors',
+      }).addTo(miniMap);
+    }
+    const positions = [];
+    buses.forEach(b => {
+      if (b.lat == null || b.lng == null) return;
+      const p = [b.lat, b.lng];
+      positions.push(p);
+      if (!busMarkers[b.bus_id]) {
+        busMarkers[b.bus_id] = L.marker(p, { icon: busIcon }).addTo(miniMap);
+      } else {
+        busMarkers[b.bus_id].setLatLng(p);
+      }
+      busMarkers[b.bus_id].bindTooltip(
+        `${b.bus_id} · ${b.next_stop || '—'}`,
+        { direction: 'top' }
+      );
+    });
+    if (positions.length === 1) {
+      miniMap.setView(positions[0], 14);
+    } else if (positions.length > 1) {
+      miniMap.fitBounds(positions, { padding: [40, 40], maxZoom: 15 });
+    }
+  }
+
+  document.getElementById('events-apply').addEventListener('click', refreshEvents);
+  document.getElementById('events-clear').addEventListener('click', () => {
+    document.getElementById('events-from').value = '';
+    document.getElementById('events-to').value = '';
+    refreshEvents();
+  });
+
+  function refreshAll() { refreshFleet(); refreshEvents(); }
+  refreshAll();
+  setInterval(refreshAll, 10000);
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'visible') refreshAll();
+  });
+</script>
+{% endblock %}
