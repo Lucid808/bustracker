@@ -21,6 +21,7 @@ app.config.update(
 )
 
 db.init_db()
+db.seed_demo_school()
 
 ALLOW_CLIENT_TS = os.environ.get("ALLOW_CLIENT_TS") == "1"
 
@@ -385,6 +386,200 @@ def driver_page():
         bus_name=cfg["name"],
         plate=cfg.get("plate", ""),
     )
+
+
+# ============================================================================
+# Admin routes — schools, buses, parents, students
+# ============================================================================
+
+import secrets as _secrets
+import re as _re
+
+
+def _require_admin():
+    """Return redirect if not admin, else None."""
+    if session.get("school") is not True:
+        return redirect("/login")
+    return None
+
+
+def _slug(name):
+    return _re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-")
+
+
+@app.get("/admin")
+def admin_dashboard():
+    r = _require_admin()
+    if r: return r
+    schools = db.list_schools()
+    counts = {
+        "schools":  len(schools),
+        "buses":    len(db.list_bus_configs()),
+        "parents":  len(db.list_parents()),
+        "students": len(db.list_students()),
+    }
+    return render_template("admin_dashboard.html", counts=counts, schools=schools)
+
+
+# ---- schools ----
+
+@app.get("/admin/schools")
+def admin_schools():
+    r = _require_admin()
+    if r: return r
+    return render_template("admin_schools.html", schools=db.list_schools(), error=None)
+
+
+@app.post("/admin/schools")
+def admin_schools_post():
+    r = _require_admin()
+    if r: return r
+    name = (request.form.get("name") or "").strip()
+    if not name:
+        return render_template("admin_schools.html",
+                               schools=db.list_schools(),
+                               error="Name is required"), 400
+    school_id = _slug(name)
+    if db.get_school(school_id):
+        return render_template("admin_schools.html",
+                               schools=db.list_schools(),
+                               error=f"A school with id '{school_id}' already exists"), 400
+    key = _secrets.token_urlsafe(32)
+    school = db.add_school(school_id, name, key)
+    return render_template("admin_schools.html",
+                           schools=db.list_schools(),
+                           error=None,
+                           created=school)
+
+
+@app.post("/admin/schools/<school_id>/delete")
+def admin_schools_delete(school_id):
+    r = _require_admin()
+    if r: return r
+    db.delete_school(school_id)
+    return redirect("/admin/schools")
+
+
+# ---- buses ----
+
+@app.get("/admin/buses")
+def admin_buses():
+    r = _require_admin()
+    if r: return r
+    return render_template("admin_buses.html",
+                           schools=db.list_schools(),
+                           buses=db.list_bus_configs(),
+                           error=None)
+
+
+@app.post("/admin/buses")
+def admin_buses_post():
+    r = _require_admin()
+    if r: return r
+    school_id = (request.form.get("school_id") or "").strip()
+    name      = (request.form.get("name") or "").strip()
+    plate     = (request.form.get("plate") or "").strip()
+    if not (school_id and name):
+        return render_template("admin_buses.html",
+                               schools=db.list_schools(),
+                               buses=db.list_bus_configs(),
+                               error="School and name are required"), 400
+    bus_id       = _slug(name) + "-" + _secrets.token_hex(2)
+    driver_token = "driver-" + _secrets.token_urlsafe(12)
+    stops = [
+        {"id": "stop-1", "name": "First Stop", "lat": -1.4700, "lng": 36.9600, "offset_min": 0},
+        {"id": "stop-2", "name": "School",     "lat": -1.4400, "lng": 37.0000, "offset_min": 30},
+    ]
+    db.add_bus_config(bus_id, school_id, name, plate, driver_token, stops)
+    return redirect("/admin/buses")
+
+
+@app.post("/admin/buses/<bus_id>/delete")
+def admin_buses_delete(bus_id):
+    r = _require_admin()
+    if r: return r
+    db.delete_bus_config(bus_id)
+    return redirect("/admin/buses")
+
+
+# ---- parents ----
+
+@app.get("/admin/parents")
+def admin_parents():
+    r = _require_admin()
+    if r: return r
+    return render_template("admin_parents.html",
+                           schools=db.list_schools(),
+                           parents=db.list_parents(),
+                           error=None)
+
+
+@app.post("/admin/parents")
+def admin_parents_post():
+    r = _require_admin()
+    if r: return r
+    school_id = (request.form.get("school_id") or "").strip()
+    name      = (request.form.get("name") or "").strip()
+    phone     = (request.form.get("phone") or "").strip()
+    if not (school_id and name and phone):
+        return render_template("admin_parents.html",
+                               schools=db.list_schools(),
+                               parents=db.list_parents(),
+                               error="School, name, and phone are required"), 400
+    token = "parent-" + _secrets.token_hex(6)
+    db.add_parent(school_id, token, name, phone)
+    return redirect("/admin/parents")
+
+
+@app.post("/admin/parents/<int:parent_id>/delete")
+def admin_parents_delete(parent_id):
+    r = _require_admin()
+    if r: return r
+    db.delete_parent(parent_id)
+    return redirect("/admin/parents")
+
+
+# ---- students ----
+
+@app.get("/admin/students")
+def admin_students():
+    r = _require_admin()
+    if r: return r
+    return render_template("admin_students.html",
+                           schools=db.list_schools(),
+                           parents=db.list_parents(),
+                           buses=db.list_bus_configs(),
+                           students=db.list_students(),
+                           error=None)
+
+
+@app.post("/admin/students")
+def admin_students_post():
+    r = _require_admin()
+    if r: return r
+    school_id = (request.form.get("school_id") or "").strip()
+    parent_id = request.form.get("parent_id")
+    name      = (request.form.get("name") or "").strip()
+    grade     = (request.form.get("grade") or "").strip()
+    stop_id   = (request.form.get("stop_id") or "").strip()
+    bus_id    = (request.form.get("bus_id") or "").strip()
+    if not (school_id and parent_id and name):
+        return render_template("admin_students.html",
+                               schools=db.list_schools(),
+                               parents=db.list_parents(),
+                               buses=db.list_bus_configs(),
+                               students=db.list_students(),
+                               error="School, parent, and name are required"), 400
+    db.add_student(school_id, int(parent_id), name, grade, stop_id, bus_id)
+    return redirect("/admin/students")
+
+
+@app.post("/admin/students/<int:student_id>/delete")
+def admin_students_delete(student_id):
+    r = _require_admin()
+    if r: return r
+    db.delete_student(student_id)
+    return redirect("/admin/students")
 
 
 @app.get("/login")
