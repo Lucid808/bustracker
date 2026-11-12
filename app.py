@@ -362,7 +362,6 @@ def api_events():
     })
 
 
-@app.get("/driver")
 def _school_ok():
     """True if the caller is logged in OR supplied the correct ?key."""
     if session.get("school") is True:
@@ -370,6 +369,7 @@ def _school_ok():
     return request.args.get("key") == SCHOOL_KEY
 
 
+@app.get("/driver")
 def driver_page():
     token = request.args.get("token", "")
     bus_id = DRIVER_TOKENS.get(token)
